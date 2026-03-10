@@ -1,8 +1,10 @@
+# app.py
 import os
 import json
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
+from typing import Dict
 
 st.set_page_config(page_title="Address Standardizer", layout="wide")
 st.title("Address Standardizer (Excel Upload) — OpenAI Only")
@@ -14,7 +16,7 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-def standardize_with_openai(address_text: str) -> dict:
+def standardize_with_openai(address_text: str) -> Dict:
     """
     Returns a JSON object with standardized address fields + flags.
     """
@@ -56,8 +58,10 @@ Address:
         input=prompt,
         text={"format": {"type": "json_object"}},
     )
+    # r.output_text should be JSON string per our prompt
     return json.loads(r.output_text)
 
+# UI: file uploader
 uploaded = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
 
 if uploaded:
@@ -68,53 +72,72 @@ if uploaded:
 
     run = st.button("Standardize addresses")
     if run:
-        out_rows = []
-        for _, row in df.iterrows():
-            raw = str(row.get(address_col, "")).strip()
-            result = {}
-            err = ""
+        total = len(df)
+        if total == 0:
+            st.warning("Uploaded file has 0 rows.")
+        else:
+            # UI elements for progress
+            progress = st.progress(0)
+            status = st.empty()
+            results = []
 
-            if not raw:
-                err = "Empty address"
-                result = {
-                    "address1": "", "address2": "", "city": "", "state": "",
-                    "zip": "", "zip4": "", "country": "US",
-                    "standardized_full": "", "quality_flags": ["EMPTY_ADDRESS"]
-                }
-            else:
-                try:
-                    result = standardize_with_openai(raw)
-                    # Defensive defaults
-                    result.setdefault("quality_flags", [])
-                except Exception as e:
-                    err = f"OpenAI error: {e}"
-                    result = {
-                        "address1": "", "address2": "", "city": "", "state": "",
-                        "zip": "", "zip4": "", "country": "US",
-                        "standardized_full": "", "quality_flags": ["OPENAI_ERROR"]
-                    }
+            # Use a spinner for overall activity
+            with st.spinner("Processing addresses... this may take a while"):
+                for idx, (_, row) in enumerate(df.iterrows(), start=1):
+                    status.text(f"Processing row {idx}/{total}...")
+                    progress.progress(int((idx - 1) / total * 100))
 
-            out = dict(row)
-            out.update({
-                "standard_address1": result.get("address1", ""),
-                "standard_address2": result.get("address2", ""),
-                "standard_city": result.get("city", ""),
-                "standard_state": result.get("state", ""),
-                "standard_zip": result.get("zip", ""),
-                "standard_zip4": result.get("zip4", ""),
-                "standard_country": result.get("country", "US"),
-                "standard_full": result.get("standardized_full", ""),
-                "quality_flags": ", ".join(result.get("quality_flags", [])),
-                "error_message": err,
-            })
-            out_rows.append(out)
+                    raw = str(row.get(address_col, "")).strip()
+                    result = {}
+                    err = ""
 
-        out_df = pd.DataFrame(out_rows)
-        st.success("Done!")
-        st.dataframe(out_df.head(50), use_container_width=True)
+                    if not raw:
+                        err = "Empty address"
+                        result = {
+                            "address1": "", "address2": "", "city": "", "state": "",
+                            "zip": "", "zip4": "", "country": "US",
+                            "standardized_full": "", "quality_flags": ["EMPTY_ADDRESS"]
+                        }
+                    else:
+                        try:
+                            result = standardize_with_openai(raw)
+                            # Ensure quality_flags exists
+                            result.setdefault("quality_flags", [])
+                        except Exception as e:
+                            # capture the error, but continue processing other rows
+                            err = f"OpenAI error: {e}"
+                            result = {
+                                "address1": "", "address2": "", "city": "", "state": "",
+                                "zip": "", "zip4": "", "country": "US",
+                                "standardized_full": "", "quality_flags": ["OPENAI_ERROR"]
+                            }
 
-        output_name = "standardized_addresses.xlsx"
-        out_df.to_excel(output_name, index=False)
+                    out = dict(row)  # original columns retained
+                    out.update({
+                        "standard_address1": result.get("address1", ""),
+                        "standard_address2": result.get("address2", ""),
+                        "standard_city": result.get("city", ""),
+                        "standard_state": result.get("state", ""),
+                        "standard_zip": result.get("zip", ""),
+                        "standard_zip4": result.get("zip4", ""),
+                        "standard_country": result.get("country", "US"),
+                        "standard_full": result.get("standardized_full", ""),
+                        "quality_flags": ", ".join(result.get("quality_flags", [])),
+                        "error_message": err,
+                    })
+                    results.append(out)
 
-        with open(output_name, "rb") as f:
-            st.download_button("Download output Excel", f, file_name=output_name)
+            # finalize progress UI
+            progress.progress(100)
+            status.text("Processing complete.")
+
+            # Build dataframe and show results
+            out_df = pd.DataFrame(results)
+            st.success("Done!")
+            st.dataframe(out_df.head(50), use_container_width=True)
+
+            # Save and provide download
+            output_name = "standardized_addresses.xlsx"
+            out_df.to_excel(output_name, index=False)
+            with open(output_name, "rb") as f:
+                st.download_button("Download output Excel", f, file_name=output_name)
